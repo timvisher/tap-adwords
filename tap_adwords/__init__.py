@@ -341,6 +341,9 @@ def create_schema_for_report(stream, sdk_client):
                                         'field': "customer_id",
                                         'inclusion': 'automatic'}
     if stream == 'AD_PERFORMANCE_REPORT':
+        # The data for this field is "image/jpeg" etc. However, the
+        # discovered schema from the report description service claims
+        # that it should be an integer. This is needed to correct that.
         report_properties['imageMimeType'] = {
             'description': 'Image Mime Type',
             'behavior': 'ATTRIBUTE',
