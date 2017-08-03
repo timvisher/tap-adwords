@@ -94,15 +94,8 @@ def state_key_name(customer_id, report_name):
     return report_name + "_" + customer_id
 
 def should_sync(discovered_schema, annotated_schema, field):
-    if annotated_schema['properties'][field].get('selected') \
-       or discovered_schema['properties'][field].get('inclusion') == 'automatic':
-        LOGGER.info("Should sync %s", field)
-        return True
-    else:
-        LOGGER.info("Should not sync %s", field)
-        LOGGER.info("annotated field: %s", annotated_schema['properties'][field])
-        LOGGER.info("discovered field: %s", discovered_schema['properties'][field])
-        return False
+    return annotated_schema['properties'][field].get('selected') \
+        or discovered_schema['properties'][field].get('inclusion') == 'automatic'
 
 def get_fields_to_sync(discovered_schema, annotated_schema):
     fields = annotated_schema['properties'] # pylint: disable=unsubscriptable-object
@@ -151,6 +144,8 @@ def sync_report(stream_name, annotated_stream_schema, sdk_client):
         if start_date < cutoff:
             start_date = cutoff
 
+    LOGGER.info('Selected fields: %s', field_list)
+
     while start_date <= pendulum.now():
         sync_report_for_day(stream_name, stream_schema, sdk_client, start_date, field_list)
         start_date = start_date.add(days=1)
@@ -169,6 +164,7 @@ def get_xml_attribute_headers(stream_schema, description_headers):
     description_to_xml_attribute = {}
     for key, value in stream_schema['properties'].items():
         description_to_xml_attribute[value['description']] = key
+    description_to_xml_attribute['Ad policies'] = 'policy'
 
     xml_attribute_headers = [description_to_xml_attribute[header] for header in description_headers]
     return xml_attribute_headers
@@ -344,6 +340,15 @@ def create_schema_for_report(stream, sdk_client):
                                         'type': 'string',
                                         'field': "customer_id",
                                         'inclusion': 'automatic'}
+    if stream == 'AD_PERFORMANCE_REPORT':
+        report_properties['imageMimeType'] = {
+            'description': 'Image Mime Type',
+            'behavior': 'ATTRIBUTE',
+            'type': ['null', 'string'],
+            'field': 'ImageCreativeMimeType',
+        }
+
+
     return {"type": "object",
             "is_report": 'true',
             "properties": report_properties,
