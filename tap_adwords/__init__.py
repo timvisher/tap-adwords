@@ -26,7 +26,7 @@ from singer import transform
 
 LOGGER = singer.get_logger()
 SESSION = requests.Session()
-PAGE_SIZE = 100
+PAGE_SIZE = 1000
 VERSION = 'v201705'
 
 REPORT_TYPE_MAPPINGS = {"Boolean":  {"type": ["null", "boolean"]},
@@ -263,8 +263,117 @@ def filter_fields_by_stream_name(stream_name, fields_to_sync):
     else:
         raise Exception("unrecognized generic stream_name {}".format(stream_name))
 
+def get_campaign_ids(sdk_client):
+    LOGGER.info("Retrieving campaign ids for customer %s", sdk_client.client_customer_id)
+    service_name = GENERIC_ENDPOINT_MAPPINGS['campaigns']['service_name']
+    service_caller = sdk_client.GetService(service_name, version=VERSION)
+    offset = 0
+    selector = {
+        'fields': ['Id'],
+        'paging': {
+            'startIndex': str(offset),
+            'numberResults': str(PAGE_SIZE)
+        }
+    }
+
+    campaign_ids = set()
+
+    while True:
+        LOGGER.info("Request %s campaign ids from offset %s for customer %s", PAGE_SIZE, offset, sdk_client.client_customer_id)
+        page = service_caller.get(selector)
+        if page['totalNumEntries'] > 100000:
+            raise Exception("Too many campaigns (%s > 100000) for customer %s", page['totalNumEntries'], sdk_client.client_customer_id)
+        if 'entries' in page:
+            for id in [entry['id'] for entry in page['entries']]:
+                campaign_ids.add(id)
+        offset += PAGE_SIZE
+        selector['paging']['startIndex'] = str(offset)
+        if offset > int(page['totalNumEntries']):
+            break
+    LOGGER.info("Retrieved %s campaign ids for customer %s. Expected %s.", len(campaign_ids), sdk_client.client_customer_id, page['totalNumEntries'])
+    return campaign_ids
+
+def is_ads_selector_safe(sdk_client, campaign_ids):
+    LOGGER.info("Ensuring ads selector safety for campaigns %s", campaign_ids)
+    selector = {
+        'fields': ['Id'],
+        'predicates': [
+            {
+                'field': 'BaseCampaignId',
+                'operator': 'IN',
+                'values': campaign_ids
+            }
+        ],
+        'paging': {
+            'startIndex': '0',
+            'numberResults': '1'
+        }
+    }
+    service_name = GENERIC_ENDPOINT_MAPPINGS['ads']['service_name']
+    service_caller = sdk_client.GetService(service_name, version=VERSION)
+    page = service_caller.get(selector)
+    LOGGER.info("Total entries %s", page['totalNumEntries'])
+    return page['totalNumEntries'] < 100000
+
+def get_safe_selectors_for_ads(sdk_client, campaign_ids):
+    LOGGER.info("Discovering safe selectors for for customer %s", sdk_client.client_customer_id)
+    safe_selectors = []
+    current_campaign_ids_window = []
+    n = 50
+    campaign_ids = [campaign_id for campaign_id in campaign_ids]
+    campaign_ids_partitions = [campaign_ids[i:i + n] for i in range(0, len(campaign_ids), n)]
+    for campaign_ids_partition in campaign_ids_partitions:
+        if not is_ads_selector_safe(sdk_client, current_campaign_ids_window + campaign_ids_partition):
+            safe_selectors += [current_campaign_ids_window]
+            current_campaign_ids_window = campaign_ids_partition
+        else:
+            current_campaign_ids_window += campaign_ids_partition
+    return safe_selectors
+
+def sync_ads_endpoint(sdk_client, campaign_ids):
+    LOGGER.info("Retrieving ad group ids for customer %s", sdk_client.client_customer_id)
+    service_name = GENERIC_ENDPOINT_MAPPINGS['ads']['service_name']
+    service_caller = sdk_client.GetService(service_name, version=VERSION)
+    safe_selectors = get_safe_selectors_for_ads(sdk_client, campaign_ids)
+
+    for safe_selector in safe_selectors:
+        selector = {
+            'fields': ['Id'],
+            'predicates': [
+                {
+                    'field': 'BaseCampaignId',
+                    'operator': 'IN',
+                    'values': [str(campaign_id) for campaign_id in safe_selector]
+                }
+            ],
+            'paging': {
+                'startIndex': '0',
+                'numberResults': '1'
+            }
+        }
+        offset = 0
+        while True:
+            LOGGER.info("Request %s ads from offset %s for customer %s, campaigns %s", PAGE_SIZE, offset, sdk_client.client_customer_id, safe_selector)
+            with metrics.http_request_timer('ads'):
+                page = service_caller.get(selector)
+                if page['totalNumEntries'] > 100000:
+                    raise Exception("Too many ads (%s > 100000) for customer %s, campaigns %s", page['totalNumEntries'], sdk_client.client_customer_id, safe_selector)
+            # if 'entries' in page:
+            #     for id in [entry['id'] for entry in page['entries']]: 
+            #         ad_group_ids.add(id)
+            offset += PAGE_SIZE
+            selector['paging']['startIndex'] = str(offset)
+            if offset > int(page['totalNumEntries']):
+                break
+
 def sync_generic_endpoint(stream_name, annotated_stream_schema, sdk_client):
-    customer_id = sdk_client.client_customer_id
+    campaign_ids = get_campaign_ids(sdk_client)
+    # ad_group_ids = get_ad_group_ids(sdk_client, campaign_ids)
+    if 'ads' == stream_name:
+        sync_ads_endpoint(sdk_client, campaign_ids)
+    elif 'ad_groups' == stream_nam:
+        sync_ad_groups_endpoint(sdk_client, campaign_ids)
+    import sys; sys.exit()
     discovered_schema = load_schema(stream_name)
     service_name = GENERIC_ENDPOINT_MAPPINGS[stream_name]['service_name']
     primary_keys = GENERIC_ENDPOINT_MAPPINGS[stream_name]['primary_keys']
@@ -308,7 +417,7 @@ def sync_generic_endpoint(stream_name, annotated_stream_schema, sdk_client):
         selector['paging']['startIndex'] = str(offset)
         if offset > int(page['totalNumEntries']):
             break
-    LOGGER.info("Done syncing %s for customer_id %s", stream_name, customer_id)
+    LOGGER.info("Done syncing %s for customer_id %s", stream_name, sdk_client.client_customer_id)
 
 def sync_stream(stream, annotated_schema, sdk_client):
     if stream in GENERIC_ENDPOINT_MAPPINGS:
