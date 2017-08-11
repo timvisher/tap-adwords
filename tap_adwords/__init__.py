@@ -293,35 +293,82 @@ def get_campaign_ids(sdk_client):
     LOGGER.info("Retrieved %s campaign ids for customer %s. Expected %s.", len(campaign_ids), sdk_client.client_customer_id, page['totalNumEntries'])
     return campaign_ids
 
-def is_ads_selector_safe(sdk_client, campaign_ids):
-    LOGGER.info("Ensuring ads selector safety for campaigns %s", campaign_ids)
+def get_ads_page(sdk_client, fields, campaign_ids, start_index):
+    service_name = GENERIC_ENDPOINT_MAPPINGS['ads']['service_name']
+    service_caller = sdk_client.GetService(service_name, version=VERSION)
     selector = {
-        'fields': ['Id'],
+        'fields': fields,
         'predicates': [
             {
                 'field': 'BaseCampaignId',
                 'operator': 'IN',
-                'values': campaign_ids
+                'values': [str(campaign_id) for campaign_id in campaign_ids]
             }
         ],
         'paging': {
-            'startIndex': '0',
-            'numberResults': '1'
+            'startIndex': str(start_index),
+            'numberResults': str(PAGE_SIZE)
         }
     }
+    with metrics.http_request_timer('ads'):
+        LOGGER.info("Request %s ads from start_index %s for customer %s, campaigns %s",
+                    PAGE_SIZE,
+                    start_index,
+                    sdk_client.client_customer_id,
+                    campaign_ids)
+        page = service_caller.get(selector)
+        return page
+
+def get_ad_groups_page(sdk_client, fields, campaign_ids, start_index):
+    service_name = GENERIC_ENDPOINT_MAPPINGS['ad_groups']['service_name']
+    service_caller = sdk_client.GetService(service_name, version=VERSION)
+    selector = {
+        'fields': fields,
+        'predicates': [
+            {
+                'field': 'BaseCampaignId',
+                'operator': 'IN',
+                'values': [str(campaign_id) for campaign_id in campaign_ids]
+            }
+        ],
+        'paging': {
+            'startIndex': str(start_index),
+            'numberResults': str(PAGE_SIZE)
+        }
+    }
+    with metrics.http_request_timer('ad_groups'):
+        LOGGER.info("Request %s ad_groups from start_index %s for customer %s, campaigns %s",
+                    PAGE_SIZE,
+                    start_index,
+                    sdk_client.client_customer_id,
+                    campaign_ids)
+        page = service_caller.get(selector)
+        return page
+
+def is_ads_selector_safe(sdk_client, campaign_ids):
+    LOGGER.info("Ensuring ads selector safety for campaigns %s", campaign_ids)
     service_name = GENERIC_ENDPOINT_MAPPINGS['ads']['service_name']
     service_caller = sdk_client.GetService(service_name, version=VERSION)
-    page = service_caller.get(selector)
+    page = get_ads_page(sdk_client, ['Id'], campaign_ids, 0)
     LOGGER.info("Total entries %s", page['totalNumEntries'])
     return page['totalNumEntries'] < 100000
 
+def is_ad_groups_selector_safe(sdk_client, campaign_ids):
+    LOGGER.info("Ensuring ad_groups selector safety for campaigns %s", campaign_ids)
+    service_name = GENERIC_ENDPOINT_MAPPINGS['ad_groups']['service_name']
+    service_caller = sdk_client.GetService(service_name, version=VERSION)
+    page = get_ad_groups_page(sdk_client, ['Id'], campaign_ids, 0)
+    LOGGER.info("Total entries %s", page['totalNumEntries'])
+    return page['totalNumEntries'] < 100000
+
+CAMPAIGN_PARTITION_SIZE = 50
+
 def get_safe_selectors_for_ads(sdk_client, campaign_ids):
-    LOGGER.info("Discovering safe selectors for for customer %s", sdk_client.client_customer_id)
+    LOGGER.info("Discovering safe ads selectors for customer %s", sdk_client.client_customer_id)
     safe_selectors = []
     current_campaign_ids_window = []
-    n = 50
     campaign_ids = [campaign_id for campaign_id in campaign_ids]
-    campaign_ids_partitions = [campaign_ids[i:i + n] for i in range(0, len(campaign_ids), n)]
+    campaign_ids_partitions = [campaign_ids[i:i + CAMPAIGN_PARTITION_SIZE] for i in range(0, len(campaign_ids), CAMPAIGN_PARTITION_SIZE)]
     for campaign_ids_partition in campaign_ids_partitions:
         if not is_ads_selector_safe(sdk_client, current_campaign_ids_window + campaign_ids_partition):
             safe_selectors += [current_campaign_ids_window]
@@ -330,94 +377,110 @@ def get_safe_selectors_for_ads(sdk_client, campaign_ids):
             current_campaign_ids_window += campaign_ids_partition
     return safe_selectors
 
-def sync_ads_endpoint(sdk_client, campaign_ids):
-    LOGGER.info("Retrieving ad group ids for customer %s", sdk_client.client_customer_id)
-    service_name = GENERIC_ENDPOINT_MAPPINGS['ads']['service_name']
-    service_caller = sdk_client.GetService(service_name, version=VERSION)
-    safe_selectors = get_safe_selectors_for_ads(sdk_client, campaign_ids)
+def get_safe_selectors_for_ad_groups(sdk_client, campaign_ids):
+    LOGGER.info("Discovering safe ad_groups selectors for customer %s", sdk_client.client_customer_id)
+    safe_selectors = []
+    current_campaign_ids_window = []
+    campaign_ids = [campaign_id for campaign_id in campaign_ids]
+    campaign_ids_partitions = [campaign_ids[i:i + CAMPAIGN_PARTITION_SIZE]
+                               for i
+                               in range(0, 
+                                        len(campaign_ids),
+                                        CAMPAIGN_PARTITION_SIZE)]
+    for campaign_ids_partition in campaign_ids_partitions:
+        if not is_ad_groups_selector_safe(sdk_client, current_campaign_ids_window + campaign_ids_partition):
+            safe_selectors += [current_campaign_ids_window]
+            current_campaign_ids_window = campaign_ids_partition
+        else:
+            current_campaign_ids_window += campaign_ids_partition
+    return safe_selectors
 
-    for safe_selector in safe_selectors:
-        selector = {
-            'fields': ['Id'],
-            'predicates': [
-                {
-                    'field': 'BaseCampaignId',
-                    'operator': 'IN',
-                    'values': [str(campaign_id) for campaign_id in safe_selector]
-                }
-            ],
-            'paging': {
-                'startIndex': '0',
-                'numberResults': '1'
-            }
-        }
-        offset = 0
+def sync_ads_endpoint(sdk_client, campaign_ids, annotated_stream_schema):
+    discovered_schema = load_schema('ads')
+    primary_keys = GENERIC_ENDPOINT_MAPPINGS['ads']['primary_keys']
+    write_schema('ads', discovered_schema, primary_keys)
+
+    LOGGER.info("Syncing ads for customer %s", sdk_client.client_customer_id)
+    field_list = get_fields_to_sync(discovered_schema, annotated_stream_schema)
+    LOGGER.info("Request fields: %s", field_list)
+    field_list = filter_fields_by_stream_name('ads', field_list)
+    LOGGER.info("Filtered fields: %s", field_list)
+
+    field_list = [f[0].upper()+f[1:] for f in field_list]
+
+    for safe_selector in get_safe_selectors_for_ads(sdk_client, campaign_ids):
+        start_index = 0
         while True:
-            LOGGER.info("Request %s ads from offset %s for customer %s, campaigns %s", PAGE_SIZE, offset, sdk_client.client_customer_id, safe_selector)
-            with metrics.http_request_timer('ads'):
-                page = service_caller.get(selector)
-                if page['totalNumEntries'] > 100000:
-                    raise Exception("Too many ads (%s > 100000) for customer %s, campaigns %s", page['totalNumEntries'], sdk_client.client_customer_id, safe_selector)
-            # if 'entries' in page:
-            #     for id in [entry['id'] for entry in page['entries']]: 
-            #         ad_group_ids.add(id)
-            offset += PAGE_SIZE
-            selector['paging']['startIndex'] = str(offset)
-            if offset > int(page['totalNumEntries']):
+            page = get_ads_page(sdk_client, field_list, safe_selector, start_index)
+            if page['totalNumEntries'] > 100000:
+                raise Exception("Too many ads ({} > 100000) for customer {}, campaigns {}".format(
+                    page['totalNumEntries'],
+                    sdk_client.client_customer_id,
+                    campaign_ids))
+            if 'entries' in page:
+                with metrics.record_counter('ads') as counter:
+                    for entry in page['entries']:
+                        record = transform(suds_to_dict(entry), discovered_schema,
+                                           integer_datetime_fmt=singer.UNIX_SECONDS_INTEGER_DATETIME_PARSING, # pylint: disable=line-too-long
+                                           pre_hook=transform_pre_hook)
+                        singer.write_record('ads', record)
+                        counter.increment()
+            start_index += PAGE_SIZE
+            if start_index > int(page['totalNumEntries']):
                 break
+    LOGGER.info("Done syncing ads for customer_id %s", sdk_client.client_customer_id)
+
+def sync_ad_groups_endpoint(sdk_client, campaign_ids, annotated_stream_schema):
+    discovered_schema = load_schema('ad_groups')
+    primary_keys = GENERIC_ENDPOINT_MAPPINGS['ad_groups']['primary_keys']
+    write_schema('ad_groups', discovered_schema, primary_keys)
+
+    LOGGER.info("Syncing ad_groups for customer %s", sdk_client.client_customer_id)
+    field_list = get_fields_to_sync(discovered_schema, annotated_stream_schema)
+    LOGGER.info("Request fields: %s", field_list)
+    field_list = filter_fields_by_stream_name('ad_groups', field_list)
+    LOGGER.info("Filtered fields: %s", field_list)
+
+    field_list = [f[0].upper()+f[1:] for f in field_list]
+
+    for safe_selector in get_safe_selectors_for_ad_groups(sdk_client, campaign_ids):
+        start_index = 0
+        while True:
+            page = get_ad_groups_page(sdk_client, field_list, safe_selector, start_index)
+            if page['totalNumEntries'] > 100000:
+                raise Exception("Too many ad_groups (%s > 100000) for customer %s, campaigns %s",
+                                page['totalNumEntries'],
+                                sdk_client.client_customer_id,
+                                campaign_ids)
+
+            if 'entries' in page:
+                with metrics.record_counter('ad_groups') as counter:
+                    for entry in page['entries']:
+                        record = transform(suds_to_dict(entry), discovered_schema,
+                                           integer_datetime_fmt=singer.UNIX_SECONDS_INTEGER_DATETIME_PARSING, # pylint: disable=line-too-long
+                                           pre_hook=transform_pre_hook)
+                        singer.write_record('ad_groups', record)
+                        counter.increment()
+            start_index += PAGE_SIZE
+            if start_index > int(page['totalNumEntries']):
+                break
+    LOGGER.info("Done syncing ad_groups for customer_id %s", sdk_client.client_customer_id)
 
 def sync_generic_endpoint(stream_name, annotated_stream_schema, sdk_client):
     campaign_ids = get_campaign_ids(sdk_client)
     # ad_group_ids = get_ad_group_ids(sdk_client, campaign_ids)
     if 'ads' == stream_name:
-        sync_ads_endpoint(sdk_client, campaign_ids)
-    elif 'ad_groups' == stream_nam:
-        sync_ad_groups_endpoint(sdk_client, campaign_ids)
-    import sys; sys.exit()
-    discovered_schema = load_schema(stream_name)
-    service_name = GENERIC_ENDPOINT_MAPPINGS[stream_name]['service_name']
-    primary_keys = GENERIC_ENDPOINT_MAPPINGS[stream_name]['primary_keys']
-    write_schema(stream_name, discovered_schema, primary_keys)
-
-    service_caller = sdk_client.GetService(service_name, version=VERSION)
-    LOGGER.info("Syncing %s", stream_name)
-    field_list = get_fields_to_sync(discovered_schema, annotated_stream_schema)
-    LOGGER.info("Request fields: %s", field_list)
-    field_list = filter_fields_by_stream_name(stream_name, field_list)
-    LOGGER.info("Filtered fields: %s", field_list)
-
-    field_list = [f[0].upper()+f[1:] for f in field_list]
-
-    offset = 0
-    selector = {
-        'fields': field_list,
-        'paging': {
-            'startIndex': str(offset),
-            'numberResults': str(PAGE_SIZE)
-        },
-    }
-
-    while True:
-        with metrics.http_request_timer(stream_name):
-            LOGGER.info("Requesting %s records from offset %s", PAGE_SIZE, offset)
-            page = service_caller.get(selector)
-            if page['totalNumEntries'] > 100000:
-                raise Exception(("Total results ({}) exceeds Google's API limits (100000). "
-                                 "http://googleadsdeveloper.blogspot.jp/2013/09/a-reminder-retrieving-large-result-sets.html").format( # pylint: disable=line-too-long
-                                     page['totalNumEntries']))
-        if 'entries' in page:
-            with metrics.record_counter(stream_name) as counter:
-                for entry in page['entries']:
-                    record = transform(suds_to_dict(entry), discovered_schema,
-                                       integer_datetime_fmt=singer.UNIX_SECONDS_INTEGER_DATETIME_PARSING, # pylint: disable=line-too-long
-                                       pre_hook=transform_pre_hook)
-                    singer.write_record(stream_name, record)
-                    counter.increment()
-        offset += PAGE_SIZE
-        selector['paging']['startIndex'] = str(offset)
-        if offset > int(page['totalNumEntries']):
-            break
-    LOGGER.info("Done syncing %s for customer_id %s", stream_name, sdk_client.client_customer_id)
+        sync_ads_endpoint(sdk_client, campaign_ids, annotated_stream_schema)
+    elif 'ad_groups' == stream_name:
+        sync_ad_groups_endpoint(sdk_client, campaign_ids, annotated_stream_schema)
+    elif 'campaigns' == stream_name:
+        # FIXME
+        1+1
+    elif 'keywords' == stream_name:
+        # FIXME
+        1+1
+    else:
+        raise Exception("Undefined generic endpoint %s", stream_name)
 
 def sync_stream(stream, annotated_schema, sdk_client):
     if stream in GENERIC_ENDPOINT_MAPPINGS:
