@@ -319,6 +319,42 @@ def get_ads_page(sdk_client, fields, campaign_ids, start_index):
         page = service_caller.get(selector)
         return page
 
+def get_campaigns_page(sdk_client, fields, start_index):
+    service_name = GENERIC_ENDPOINT_MAPPINGS['campaigns']['service_name']
+    service_caller = sdk_client.GetService(service_name, version=VERSION)
+    selector = {
+        'fields': fields,
+        'paging': {
+            'startIndex': str(start_index),
+            'numberResults': str(PAGE_SIZE)
+        }
+    }
+    with metrics.http_request_timer('campaigns'):
+        LOGGER.info("Request %s campaigns from start_index %s for customer %s",
+                    PAGE_SIZE,
+                    start_index,
+                    sdk_client.client_customer_id)
+        page = service_caller.get(selector)
+        return page
+
+def get_accounts_page(sdk_client, fields, start_index):
+    service_name = GENERIC_ENDPOINT_MAPPINGS['accounts']['service_name']
+    service_caller = sdk_client.GetService(service_name, version=VERSION)
+    selector = {
+        'fields': fields,
+        'paging': {
+            'startIndex': str(start_index),
+            'numberResults': str(PAGE_SIZE)
+        }
+    }
+    with metrics.http_request_timer('accounts'):
+        LOGGER.info("Request %s accounts from start_index %s for customer %s",
+                    PAGE_SIZE,
+                    start_index,
+                    sdk_client.client_customer_id)
+        page = service_caller.get(selector)
+        return page
+
 def get_ad_groups_page(sdk_client, fields, campaign_ids, start_index):
     service_name = GENERIC_ENDPOINT_MAPPINGS['ad_groups']['service_name']
     service_caller = sdk_client.GetService(service_name, version=VERSION)
@@ -395,90 +431,111 @@ def get_safe_selectors_for_ad_groups(sdk_client, campaign_ids):
             current_campaign_ids_window += campaign_ids_partition
     return safe_selectors
 
-def sync_ads_endpoint(sdk_client, campaign_ids, annotated_stream_schema):
-    discovered_schema = load_schema('ads')
-    primary_keys = GENERIC_ENDPOINT_MAPPINGS['ads']['primary_keys']
-    write_schema('ads', discovered_schema, primary_keys)
+def sync_generic_campaign_ids_endpoint(sdk_client,
+                                       campaign_ids,
+                                       annotated_stream_schema,
+                                       stream,
+                                       get_safe_selector_for_campaign_ids_endpoint_fn,
+                                       get_campaign_ids_endpoint_page_fn):
+    discovered_schema = load_schema(stream)
+    primary_keys = GENERIC_ENDPOINT_MAPPINGS[stream]['primary_keys']
+    write_schema(stream, discovered_schema, primary_keys)
 
-    LOGGER.info("Syncing ads for customer %s", sdk_client.client_customer_id)
+    LOGGER.info("Syncing %s for customer %s", stream, sdk_client.client_customer_id)
+
+    # FIXME extract function
     field_list = get_fields_to_sync(discovered_schema, annotated_stream_schema)
     LOGGER.info("Request fields: %s", field_list)
-    field_list = filter_fields_by_stream_name('ads', field_list)
+    field_list = filter_fields_by_stream_name(stream, field_list)
     LOGGER.info("Filtered fields: %s", field_list)
-
     field_list = [f[0].upper()+f[1:] for f in field_list]
 
-    for safe_selector in get_safe_selectors_for_ads(sdk_client, campaign_ids):
+    for safe_selector in get_safe_selector_for_campaign_ids_endpoint_fn(sdk_client, campaign_ids):
         start_index = 0
         while True:
-            page = get_ads_page(sdk_client, field_list, safe_selector, start_index)
+            page = get_campaign_ids_endpoint_page_fn(sdk_client, field_list, safe_selector, start_index)
             if page['totalNumEntries'] > 100000:
-                raise Exception("Too many ads ({} > 100000) for customer {}, campaigns {}".format(
+                raise Exception("Too many %s ({} > 100000) for customer {}, campaigns {}".format(
+                    stream,
                     page['totalNumEntries'],
                     sdk_client.client_customer_id,
                     campaign_ids))
             if 'entries' in page:
-                with metrics.record_counter('ads') as counter:
+                with metrics.record_counter(stream) as counter:
                     for entry in page['entries']:
                         record = transform(suds_to_dict(entry), discovered_schema,
                                            integer_datetime_fmt=singer.UNIX_SECONDS_INTEGER_DATETIME_PARSING, # pylint: disable=line-too-long
                                            pre_hook=transform_pre_hook)
-                        singer.write_record('ads', record)
+                        singer.write_record(stream, record)
                         counter.increment()
             start_index += PAGE_SIZE
             if start_index > int(page['totalNumEntries']):
                 break
-    LOGGER.info("Done syncing ads for customer_id %s", sdk_client.client_customer_id)
+    LOGGER.info("Done syncing %s for customer_id %s", stream, sdk_client.client_customer_id)
 
-def sync_ad_groups_endpoint(sdk_client, campaign_ids, annotated_stream_schema):
-    discovered_schema = load_schema('ad_groups')
-    primary_keys = GENERIC_ENDPOINT_MAPPINGS['ad_groups']['primary_keys']
-    write_schema('ad_groups', discovered_schema, primary_keys)
+def sync_generic_basic_endpoint(sdk_client, annotated_stream_schema, stream, get_stream_page_fn):
+    discovered_schema = load_schema(stream)
+    primary_keys = GENERIC_ENDPOINT_MAPPINGS[stream]['primary_keys']
+    write_schema(stream, discovered_schema, primary_keys)
 
-    LOGGER.info("Syncing ad_groups for customer %s", sdk_client.client_customer_id)
+    LOGGER.info("Syncing %s for customer %s", stream, sdk_client.client_customer_id)
+
+    # FIXME extract function
     field_list = get_fields_to_sync(discovered_schema, annotated_stream_schema)
     LOGGER.info("Request fields: %s", field_list)
-    field_list = filter_fields_by_stream_name('ad_groups', field_list)
+    field_list = filter_fields_by_stream_name(stream, field_list)
     LOGGER.info("Filtered fields: %s", field_list)
-
     field_list = [f[0].upper()+f[1:] for f in field_list]
 
-    for safe_selector in get_safe_selectors_for_ad_groups(sdk_client, campaign_ids):
-        start_index = 0
-        while True:
-            page = get_ad_groups_page(sdk_client, field_list, safe_selector, start_index)
-            if page['totalNumEntries'] > 100000:
-                raise Exception("Too many ad_groups (%s > 100000) for customer %s, campaigns %s",
-                                page['totalNumEntries'],
-                                sdk_client.client_customer_id,
-                                campaign_ids)
+    start_index = 0
+    while True:
+        page = get_stream_page_fn(sdk_client, field_list, start_index)
+        if page['totalNumEntries'] > 100000:
+            raise Exception("Too many %s (%s > 100000) for customer %s",
+                            stream,
+                            page['totalNumEntries'],
+                            sdk_client.client_customer_id)
 
-            if 'entries' in page:
-                with metrics.record_counter('ad_groups') as counter:
-                    for entry in page['entries']:
-                        record = transform(suds_to_dict(entry), discovered_schema,
-                                           integer_datetime_fmt=singer.UNIX_SECONDS_INTEGER_DATETIME_PARSING, # pylint: disable=line-too-long
-                                           pre_hook=transform_pre_hook)
-                        singer.write_record('ad_groups', record)
-                        counter.increment()
-            start_index += PAGE_SIZE
-            if start_index > int(page['totalNumEntries']):
-                break
-    LOGGER.info("Done syncing ad_groups for customer_id %s", sdk_client.client_customer_id)
+        if 'entries' in page:
+            with metrics.record_counter(stream) as counter:
+                for entry in page['entries']:
+                    record = transform(suds_to_dict(entry), discovered_schema,
+                                       integer_datetime_fmt=singer.UNIX_SECONDS_INTEGER_DATETIME_PARSING, # pylint: disable=line-too-long
+                                       pre_hook=transform_pre_hook)
+                    singer.write_record(stream, record)
+                    counter.increment()
+        start_index += PAGE_SIZE
+        if start_index > int(page['totalNumEntries']):
+            break
+    LOGGER.info("Done syncing %s for customer_id %s", stream, sdk_client.client_customer_id)
 
 def sync_generic_endpoint(stream_name, annotated_stream_schema, sdk_client):
     campaign_ids = get_campaign_ids(sdk_client)
     # ad_group_ids = get_ad_group_ids(sdk_client, campaign_ids)
     if 'ads' == stream_name:
-        sync_ads_endpoint(sdk_client, campaign_ids, annotated_stream_schema)
+        sync_generic_campaign_ids_endpoint(sdk_client,
+                                           campaign_ids,
+                                           annotated_stream_schema,
+                                           'ads',
+                                           get_safe_selectors_for_ads,
+                                           get_ads_page)
     elif 'ad_groups' == stream_name:
-        sync_ad_groups_endpoint(sdk_client, campaign_ids, annotated_stream_schema)
+        sync_generic_campaign_ids_endpoint(sdk_client,
+                                           campaign_ids,
+                                           annotated_stream_schema,
+                                           'ad_groups',
+                                           get_safe_selectors_for_ad_groups,
+                                           get_ad_groups_page)
     elif 'campaigns' == stream_name:
-        # FIXME
-        1+1
-    elif 'keywords' == stream_name:
-        # FIXME
-        1+1
+        sync_generic_basic_endpoint(sdk_client,
+                                    annotated_stream_schema,
+                                    'campaigns',
+                                    get_campaigns_page)
+    elif 'accounts' == stream_name:
+        sync_generic_basic_endpoint(sdk_client,
+                                    annotated_stream_schema,
+                                    'accounts',
+                                    get_accounts_page)
     else:
         raise Exception("Undefined generic endpoint %s", stream_name)
 
