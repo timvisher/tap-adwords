@@ -386,19 +386,11 @@ def get_ad_groups_page(sdk_client, fields, campaign_ids, start_index):
         page = service_caller.get(selector)
         return page
 
-def is_ads_selector_safe(sdk_client, campaign_ids):
-    LOGGER.info("Ensuring ads selector safety for campaigns %s", campaign_ids)
-    service_name = GENERIC_ENDPOINT_MAPPINGS['ads']['service_name']
+def is_campaign_ids_selector_safe(sdk_client, campaign_ids, stream, get_page_fn):
+    LOGGER.info("Ensuring %s selector safety for campaigns %s", stream, campaign_ids)
+    service_name = GENERIC_ENDPOINT_MAPPINGS[stream]['service_name']
     service_caller = sdk_client.GetService(service_name, version=VERSION)
-    page = get_ads_page(sdk_client, ['Id'], campaign_ids, 0)
-    LOGGER.info("Total entries %s", page['totalNumEntries'])
-    return page['totalNumEntries'] < GOOGLE_MAX_RESULTSET_SIZE
-
-def is_ad_groups_selector_safe(sdk_client, campaign_ids):
-    LOGGER.info("Ensuring ad_groups selector safety for campaigns %s", campaign_ids)
-    service_name = GENERIC_ENDPOINT_MAPPINGS['ad_groups']['service_name']
-    service_caller = sdk_client.GetService(service_name, version=VERSION)
-    page = get_ad_groups_page(sdk_client, ['Id'], campaign_ids, 0)
+    page = get_page_fn(sdk_client, ['Id'], campaign_ids, 0)
     LOGGER.info("Total entries %s", page['totalNumEntries'])
     return page['totalNumEntries'] < GOOGLE_MAX_RESULTSET_SIZE
 
@@ -407,7 +399,7 @@ CAMPAIGN_PARTITION_SIZE = 50
 def get_safe_selectors_for_campaign_ids_endpoint(sdk_client,
                                                  campaign_ids,
                                                  stream,
-                                                 is_campaign_ids_endpoint_selector_safe_fn):
+                                                 get_campaign_ids_endpoint_page_fn):
     LOGGER.info("Discovering safe %s selectors for customer %s", stream, sdk_client.client_customer_id)
     safe_selectors = []
     current_campaign_ids_window = []
@@ -418,9 +410,11 @@ def get_safe_selectors_for_campaign_ids_endpoint(sdk_client,
                                         len(campaign_ids),
                                         CAMPAIGN_PARTITION_SIZE)]
     for campaign_ids_partition in campaign_ids_partitions:
-        if not is_campaign_ids_endpoint_selector_safe_fn(
+        if not is_campaign_ids_selector_safe(
                 sdk_client,
-                current_campaign_ids_window + campaign_ids_partition):
+                current_campaign_ids_window + campaign_ids_partition,
+                stream,
+                get_campaign_ids_endpoint_page_fn):
             safe_selectors += [current_campaign_ids_window]
             current_campaign_ids_window = campaign_ids_partition
         else:
@@ -447,15 +441,15 @@ def sync_generic_campaign_ids_endpoint(sdk_client,
     field_list = [f[0].upper()+f[1:] for f in field_list]
 
     if stream == 'ads':
-        is_campaign_ids_endpoint_selector_safe_fn = is_ads_selector_safe
+        is_campaign_ids_endpoint_page_fn = get_ads_page
     elif stream == 'ad_groups':
-        is_campaign_ids_endpoint_selector_safe_fn = is_ad_groups_selector_safe
+        is_campaign_ids_endpoint_selector_safe_fn = get_ad_groups_page
 
     for safe_selector in get_safe_selectors_for_campaign_ids_endpoint(
             sdk_client,
             campaign_ids,
             stream,
-            is_campaign_ids_endpoint_selector_safe_fn):
+            get_campaign_ids_endpoint_page_fn):
         start_index = 0
         while True:
             page = get_campaign_ids_endpoint_page_fn(sdk_client, field_list, safe_selector, start_index)
