@@ -411,6 +411,7 @@ def get_safe_selectors_for_ads(sdk_client, campaign_ids):
             current_campaign_ids_window = campaign_ids_partition
         else:
             current_campaign_ids_window += campaign_ids_partition
+    safe_selectors += [current_campaign_ids_window]
     return safe_selectors
 
 def get_safe_selectors_for_ad_groups(sdk_client, campaign_ids):
@@ -429,13 +430,14 @@ def get_safe_selectors_for_ad_groups(sdk_client, campaign_ids):
             current_campaign_ids_window = campaign_ids_partition
         else:
             current_campaign_ids_window += campaign_ids_partition
+    safe_selectors += [current_campaign_ids_window]
     return safe_selectors
 
 def sync_generic_campaign_ids_endpoint(sdk_client,
                                        campaign_ids,
                                        annotated_stream_schema,
                                        stream,
-                                       get_safe_selector_for_campaign_ids_endpoint_fn,
+                                       get_safe_selectors_for_campaign_ids_endpoint_fn,
                                        get_campaign_ids_endpoint_page_fn):
     discovered_schema = load_schema(stream)
     primary_keys = GENERIC_ENDPOINT_MAPPINGS[stream]['primary_keys']
@@ -450,7 +452,7 @@ def sync_generic_campaign_ids_endpoint(sdk_client,
     LOGGER.info("Filtered fields: %s", field_list)
     field_list = [f[0].upper()+f[1:] for f in field_list]
 
-    for safe_selector in get_safe_selector_for_campaign_ids_endpoint_fn(sdk_client, campaign_ids):
+    for safe_selector in get_safe_selectors_for_campaign_ids_endpoint_fn(sdk_client, campaign_ids):
         start_index = 0
         while True:
             page = get_campaign_ids_endpoint_page_fn(sdk_client, field_list, safe_selector, start_index)
