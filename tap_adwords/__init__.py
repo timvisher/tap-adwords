@@ -263,6 +263,8 @@ def filter_fields_by_stream_name(stream_name, fields_to_sync):
     else:
         raise Exception("unrecognized generic stream_name {}".format(stream_name))
 
+GOOGLE_MAX_RESULTSET_SIZE=100000
+
 def get_campaign_ids(sdk_client):
     LOGGER.info("Retrieving campaign ids for customer %s", sdk_client.client_customer_id)
     service_name = GENERIC_ENDPOINT_MAPPINGS['campaigns']['service_name']
@@ -281,8 +283,11 @@ def get_campaign_ids(sdk_client):
     while True:
         LOGGER.info("Request %s campaign ids from offset %s for customer %s", PAGE_SIZE, offset, sdk_client.client_customer_id)
         page = service_caller.get(selector)
-        if page['totalNumEntries'] > 100000:
-            raise Exception("Too many campaigns (%s > 100000) for customer %s", page['totalNumEntries'], sdk_client.client_customer_id)
+        if page['totalNumEntries'] > GOOGLE_MAX_RESULTSET_SIZE:
+            raise Exception("Too many campaigns (%s > %s) for customer %s",
+                            page['totalNumEntries'],
+                            GOOGLE_MAX_RESULTSET_SIZE,
+                            sdk_client.client_customer_id)
         if 'entries' in page:
             for id in [entry['id'] for entry in page['entries']]:
                 campaign_ids.add(id)
@@ -387,7 +392,7 @@ def is_ads_selector_safe(sdk_client, campaign_ids):
     service_caller = sdk_client.GetService(service_name, version=VERSION)
     page = get_ads_page(sdk_client, ['Id'], campaign_ids, 0)
     LOGGER.info("Total entries %s", page['totalNumEntries'])
-    return page['totalNumEntries'] < 100000
+    return page['totalNumEntries'] < GOOGLE_MAX_RESULTSET_SIZE
 
 def is_ad_groups_selector_safe(sdk_client, campaign_ids):
     LOGGER.info("Ensuring ad_groups selector safety for campaigns %s", campaign_ids)
@@ -395,27 +400,15 @@ def is_ad_groups_selector_safe(sdk_client, campaign_ids):
     service_caller = sdk_client.GetService(service_name, version=VERSION)
     page = get_ad_groups_page(sdk_client, ['Id'], campaign_ids, 0)
     LOGGER.info("Total entries %s", page['totalNumEntries'])
-    return page['totalNumEntries'] < 100000
+    return page['totalNumEntries'] < GOOGLE_MAX_RESULTSET_SIZE
 
 CAMPAIGN_PARTITION_SIZE = 50
 
-def get_safe_selectors_for_ads(sdk_client, campaign_ids):
-    LOGGER.info("Discovering safe ads selectors for customer %s", sdk_client.client_customer_id)
-    safe_selectors = []
-    current_campaign_ids_window = []
-    campaign_ids = [campaign_id for campaign_id in campaign_ids]
-    campaign_ids_partitions = [campaign_ids[i:i + CAMPAIGN_PARTITION_SIZE] for i in range(0, len(campaign_ids), CAMPAIGN_PARTITION_SIZE)]
-    for campaign_ids_partition in campaign_ids_partitions:
-        if not is_ads_selector_safe(sdk_client, current_campaign_ids_window + campaign_ids_partition):
-            safe_selectors += [current_campaign_ids_window]
-            current_campaign_ids_window = campaign_ids_partition
-        else:
-            current_campaign_ids_window += campaign_ids_partition
-    safe_selectors += [current_campaign_ids_window]
-    return safe_selectors
-
-def get_safe_selectors_for_ad_groups(sdk_client, campaign_ids):
-    LOGGER.info("Discovering safe ad_groups selectors for customer %s", sdk_client.client_customer_id)
+def get_safe_selectors_for_campaign_ids_endpoint(sdk_client,
+                                                 campaign_ids,
+                                                 stream,
+                                                 is_campaign_ids_endpoint_selector_safe_fn):
+    LOGGER.info("Discovering safe %s selectors for customer %s", stream, sdk_client.client_customer_id)
     safe_selectors = []
     current_campaign_ids_window = []
     campaign_ids = [campaign_id for campaign_id in campaign_ids]
@@ -425,7 +418,9 @@ def get_safe_selectors_for_ad_groups(sdk_client, campaign_ids):
                                         len(campaign_ids),
                                         CAMPAIGN_PARTITION_SIZE)]
     for campaign_ids_partition in campaign_ids_partitions:
-        if not is_ad_groups_selector_safe(sdk_client, current_campaign_ids_window + campaign_ids_partition):
+        if not is_campaign_ids_endpoint_selector_safe_fn(
+                sdk_client,
+                current_campaign_ids_window + campaign_ids_partition):
             safe_selectors += [current_campaign_ids_window]
             current_campaign_ids_window = campaign_ids_partition
         else:
@@ -437,7 +432,6 @@ def sync_generic_campaign_ids_endpoint(sdk_client,
                                        campaign_ids,
                                        annotated_stream_schema,
                                        stream,
-                                       get_safe_selectors_for_campaign_ids_endpoint_fn,
                                        get_campaign_ids_endpoint_page_fn):
     discovered_schema = load_schema(stream)
     primary_keys = GENERIC_ENDPOINT_MAPPINGS[stream]['primary_keys']
@@ -452,13 +446,23 @@ def sync_generic_campaign_ids_endpoint(sdk_client,
     LOGGER.info("Filtered fields: %s", field_list)
     field_list = [f[0].upper()+f[1:] for f in field_list]
 
-    for safe_selector in get_safe_selectors_for_campaign_ids_endpoint_fn(sdk_client, campaign_ids):
+    if stream == 'ads':
+        is_campaign_ids_endpoint_selector_safe_fn = is_ads_selector_safe
+    elif stream == 'ad_groups':
+        is_campaign_ids_endpoint_selector_safe_fn = is_ad_groups_selector_safe
+
+    for safe_selector in get_safe_selectors_for_campaign_ids_endpoint(
+            sdk_client,
+            campaign_ids,
+            stream,
+            is_campaign_ids_endpoint_selector_safe_fn):
         start_index = 0
         while True:
             page = get_campaign_ids_endpoint_page_fn(sdk_client, field_list, safe_selector, start_index)
-            if page['totalNumEntries'] > 100000:
-                raise Exception("Too many %s ({} > 100000) for customer {}, campaigns {}".format(
+            if page['totalNumEntries'] > GOOGLE_MAX_RESULTSET_SIZE:
+                raise Exception("Too many %s ({} > {}) for customer {}, campaigns {}".format(
                     stream,
+                    GOOGLE_MAX_RESULTSET_SIZE,
                     page['totalNumEntries'],
                     sdk_client.client_customer_id,
                     campaign_ids))
@@ -492,9 +496,10 @@ def sync_generic_basic_endpoint(sdk_client, annotated_stream_schema, stream, get
     start_index = 0
     while True:
         page = get_stream_page_fn(sdk_client, field_list, start_index)
-        if page['totalNumEntries'] > 100000:
-            raise Exception("Too many %s (%s > 100000) for customer %s",
+        if page['totalNumEntries'] > GOOGLE_MAX_RESULTSET_SIZE:
+            raise Exception("Too many %s (%s > %s) for customer %s",
                             stream,
+                            GOOGLE_MAX_RESULTSET_SIZE,
                             page['totalNumEntries'],
                             sdk_client.client_customer_id)
 
@@ -519,14 +524,12 @@ def sync_generic_endpoint(stream_name, annotated_stream_schema, sdk_client):
                                            campaign_ids,
                                            annotated_stream_schema,
                                            'ads',
-                                           get_safe_selectors_for_ads,
                                            get_ads_page)
     elif 'ad_groups' == stream_name:
         sync_generic_campaign_ids_endpoint(sdk_client,
                                            campaign_ids,
                                            annotated_stream_schema,
                                            'ad_groups',
-                                           get_safe_selectors_for_ad_groups,
                                            get_ad_groups_page)
     elif 'campaigns' == stream_name:
         sync_generic_basic_endpoint(sdk_client,
