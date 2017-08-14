@@ -298,8 +298,8 @@ def get_campaign_ids(sdk_client):
     LOGGER.info("Retrieved %s campaign ids for customer %s. Expected %s.", len(campaign_ids), sdk_client.client_customer_id, page['totalNumEntries'])
     return campaign_ids
 
-def get_ads_page(sdk_client, fields, campaign_ids, start_index):
-    service_name = GENERIC_ENDPOINT_MAPPINGS['ads']['service_name']
+def get_campaign_ids_filtered_page(sdk_client, fields, campaign_ids, stream, start_index):
+    service_name = GENERIC_ENDPOINT_MAPPINGS[stream]['service_name']
     service_caller = sdk_client.GetService(service_name, version=VERSION)
     selector = {
         'fields': fields,
@@ -315,8 +315,9 @@ def get_ads_page(sdk_client, fields, campaign_ids, start_index):
             'numberResults': str(PAGE_SIZE)
         }
     }
-    with metrics.http_request_timer('ads'):
-        LOGGER.info("Request %s ads from start_index %s for customer %s, campaigns %s",
+    with metrics.http_request_timer(stream):
+        LOGGER.info("Request %s %s from start_index %s for customer %s, campaigns %s",
+                    stream,
                     PAGE_SIZE,
                     start_index,
                     sdk_client.client_customer_id,
@@ -360,37 +361,11 @@ def get_accounts_page(sdk_client, fields, start_index):
         page = service_caller.get(selector)
         return page
 
-def get_ad_groups_page(sdk_client, fields, campaign_ids, start_index):
-    service_name = GENERIC_ENDPOINT_MAPPINGS['ad_groups']['service_name']
-    service_caller = sdk_client.GetService(service_name, version=VERSION)
-    selector = {
-        'fields': fields,
-        'predicates': [
-            {
-                'field': 'BaseCampaignId',
-                'operator': 'IN',
-                'values': [str(campaign_id) for campaign_id in campaign_ids]
-            }
-        ],
-        'paging': {
-            'startIndex': str(start_index),
-            'numberResults': str(PAGE_SIZE)
-        }
-    }
-    with metrics.http_request_timer('ad_groups'):
-        LOGGER.info("Request %s ad_groups from start_index %s for customer %s, campaigns %s",
-                    PAGE_SIZE,
-                    start_index,
-                    sdk_client.client_customer_id,
-                    campaign_ids)
-        page = service_caller.get(selector)
-        return page
-
-def is_campaign_ids_selector_safe(sdk_client, campaign_ids, stream, get_page_fn):
+def is_campaign_ids_selector_safe(sdk_client, campaign_ids, stream):
     LOGGER.info("Ensuring %s selector safety for campaigns %s", stream, campaign_ids)
     service_name = GENERIC_ENDPOINT_MAPPINGS[stream]['service_name']
     service_caller = sdk_client.GetService(service_name, version=VERSION)
-    page = get_page_fn(sdk_client, ['Id'], campaign_ids, 0)
+    page = get_campaign_ids_filtered_page(sdk_client, ['Id'], campaign_ids, stream, 0)
     LOGGER.info("Total entries %s", page['totalNumEntries'])
     return page['totalNumEntries'] < GOOGLE_MAX_RESULTSET_SIZE
 
@@ -398,8 +373,7 @@ CAMPAIGN_PARTITION_SIZE = 50
 
 def get_safe_selectors_for_campaign_ids_endpoint(sdk_client,
                                                  campaign_ids,
-                                                 stream,
-                                                 get_campaign_ids_endpoint_page_fn):
+                                                 stream):
     LOGGER.info("Discovering safe %s selectors for customer %s", stream, sdk_client.client_customer_id)
     safe_selectors = []
     current_campaign_ids_window = []
@@ -413,8 +387,7 @@ def get_safe_selectors_for_campaign_ids_endpoint(sdk_client,
         if not is_campaign_ids_selector_safe(
                 sdk_client,
                 current_campaign_ids_window + campaign_ids_partition,
-                stream,
-                get_campaign_ids_endpoint_page_fn):
+                stream):
             safe_selectors += [current_campaign_ids_window]
             current_campaign_ids_window = campaign_ids_partition
         else:
@@ -434,8 +407,7 @@ def get_field_list(discovered_schema, annotated_stream_schema, stream):
 def sync_generic_campaign_ids_endpoint(sdk_client,
                                        campaign_ids,
                                        annotated_stream_schema,
-                                       stream,
-                                       get_campaign_ids_endpoint_page_fn):
+                                       stream):
     discovered_schema = load_schema(stream)
     primary_keys = GENERIC_ENDPOINT_MAPPINGS[stream]['primary_keys']
     write_schema(stream, discovered_schema, primary_keys)
@@ -444,19 +416,17 @@ def sync_generic_campaign_ids_endpoint(sdk_client,
 
     field_list = get_field_list(discovered_schema, annotated_stream_schema, stream)
 
-    if stream == 'ads':
-        is_campaign_ids_endpoint_page_fn = get_ads_page
-    elif stream == 'ad_groups':
-        is_campaign_ids_endpoint_selector_safe_fn = get_ad_groups_page
-
     for safe_selector in get_safe_selectors_for_campaign_ids_endpoint(
             sdk_client,
             campaign_ids,
-            stream,
-            get_campaign_ids_endpoint_page_fn):
+            stream):
         start_index = 0
         while True:
-            page = get_campaign_ids_endpoint_page_fn(sdk_client, field_list, safe_selector, start_index)
+            page = get_campaign_ids_filtered_page(sdk_client,
+                                                  field_list,
+                                                  safe_selector,
+                                                  stream,
+                                                  start_index)
             if page['totalNumEntries'] > GOOGLE_MAX_RESULTSET_SIZE:
                 raise Exception("Too many %s ({} > {}) for customer {}, campaigns {}".format(
                     stream,
@@ -511,19 +481,16 @@ def sync_generic_basic_endpoint(sdk_client, annotated_stream_schema, stream, get
 
 def sync_generic_endpoint(stream_name, annotated_stream_schema, sdk_client):
     campaign_ids = get_campaign_ids(sdk_client)
-    # ad_group_ids = get_ad_group_ids(sdk_client, campaign_ids)
     if 'ads' == stream_name:
         sync_generic_campaign_ids_endpoint(sdk_client,
                                            campaign_ids,
                                            annotated_stream_schema,
-                                           'ads',
-                                           get_ads_page)
+                                           'ads')
     elif 'ad_groups' == stream_name:
         sync_generic_campaign_ids_endpoint(sdk_client,
                                            campaign_ids,
                                            annotated_stream_schema,
-                                           'ad_groups',
-                                           get_ad_groups_page)
+                                           'ad_groups')
     elif 'campaigns' == stream_name:
         sync_generic_basic_endpoint(sdk_client,
                                     annotated_stream_schema,
