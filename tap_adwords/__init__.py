@@ -325,8 +325,8 @@ def get_campaign_ids_filtered_page(sdk_client, fields, campaign_ids, stream, sta
         page = service_caller.get(selector)
         return page
 
-def get_campaigns_page(sdk_client, fields, start_index):
-    service_name = GENERIC_ENDPOINT_MAPPINGS['campaigns']['service_name']
+def get_unfiltered_page(sdk_client, fields, start_index, stream):
+    service_name = GENERIC_ENDPOINT_MAPPINGS[stream]['service_name']
     service_caller = sdk_client.GetService(service_name, version=VERSION)
     selector = {
         'fields': fields,
@@ -335,27 +335,10 @@ def get_campaigns_page(sdk_client, fields, start_index):
             'numberResults': str(PAGE_SIZE)
         }
     }
-    with metrics.http_request_timer('campaigns'):
-        LOGGER.info("Request %s campaigns from start_index %s for customer %s",
+    with metrics.http_request_timer(stream):
+        LOGGER.info("Request %s %s from start_index %s for customer %s",
                     PAGE_SIZE,
-                    start_index,
-                    sdk_client.client_customer_id)
-        page = service_caller.get(selector)
-        return page
-
-def get_accounts_page(sdk_client, fields, start_index):
-    service_name = GENERIC_ENDPOINT_MAPPINGS['accounts']['service_name']
-    service_caller = sdk_client.GetService(service_name, version=VERSION)
-    selector = {
-        'fields': fields,
-        'paging': {
-            'startIndex': str(start_index),
-            'numberResults': str(PAGE_SIZE)
-        }
-    }
-    with metrics.http_request_timer('accounts'):
-        LOGGER.info("Request %s accounts from start_index %s for customer %s",
-                    PAGE_SIZE,
+                    stream,
                     start_index,
                     sdk_client.client_customer_id)
         page = service_caller.get(selector)
@@ -447,7 +430,7 @@ def sync_generic_campaign_ids_endpoint(sdk_client,
                 break
     LOGGER.info("Done syncing %s for customer_id %s", stream, sdk_client.client_customer_id)
 
-def sync_generic_basic_endpoint(sdk_client, annotated_stream_schema, stream, get_stream_page_fn):
+def sync_generic_basic_endpoint(sdk_client, annotated_stream_schema, stream):
     discovered_schema = load_schema(stream)
     primary_keys = GENERIC_ENDPOINT_MAPPINGS[stream]['primary_keys']
     write_schema(stream, discovered_schema, primary_keys)
@@ -458,7 +441,7 @@ def sync_generic_basic_endpoint(sdk_client, annotated_stream_schema, stream, get
 
     start_index = 0
     while True:
-        page = get_stream_page_fn(sdk_client, field_list, start_index)
+        page = get_unfiltered_page(sdk_client, field_list, start_index, stream)
         if page['totalNumEntries'] > GOOGLE_MAX_RESULTSET_SIZE:
             raise Exception("Too many %s (%s > %s) for customer %s",
                             stream,
@@ -494,13 +477,11 @@ def sync_generic_endpoint(stream_name, annotated_stream_schema, sdk_client):
     elif 'campaigns' == stream_name:
         sync_generic_basic_endpoint(sdk_client,
                                     annotated_stream_schema,
-                                    'campaigns',
-                                    get_campaigns_page)
+                                    'campaigns')
     elif 'accounts' == stream_name:
         sync_generic_basic_endpoint(sdk_client,
                                     annotated_stream_schema,
-                                    'accounts',
-                                    get_accounts_page)
+                                    'accounts')
     else:
         raise Exception("Undefined generic endpoint %s", stream_name)
 
