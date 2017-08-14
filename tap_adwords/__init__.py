@@ -100,7 +100,6 @@ def get_fields_to_sync(discovered_schema, annotated_schema):
     fields = annotated_schema['properties'] # pylint: disable=unsubscriptable-object
     return [field for field in fields if should_sync(discovered_schema, annotated_schema, field)]
 
-
 def strip_inclusion(dic):
     dic.pop("inclusion", None)
     for val in dic.values():
@@ -266,6 +265,7 @@ def filter_fields_by_stream_name(stream_name, fields_to_sync):
 GOOGLE_MAX_RESULTSET_SIZE = 100000
 
 def get_campaign_ids(sdk_client):
+    # TODO this could be refactored to reuse some of the other functions
     LOGGER.info("Retrieving campaign ids for customer %s", sdk_client.client_customer_id)
     service_name = GENERIC_ENDPOINT_MAPPINGS['campaigns']['service_name']
     service_caller = sdk_client.GetService(service_name, version=VERSION)
