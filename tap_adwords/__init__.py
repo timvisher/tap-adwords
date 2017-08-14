@@ -363,7 +363,7 @@ def get_safe_selectors_for_campaign_ids_endpoint(sdk_client,
     campaign_ids = [campaign_id for campaign_id in campaign_ids]
     campaign_ids_partitions = [campaign_ids[i:i + CAMPAIGN_PARTITION_SIZE]
                                for i
-                               in range(0, 
+                               in range(0,
                                         len(campaign_ids),
                                         CAMPAIGN_PARTITION_SIZE)]
     for campaign_ids_partition in campaign_ids_partitions:
