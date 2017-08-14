@@ -422,6 +422,15 @@ def get_safe_selectors_for_campaign_ids_endpoint(sdk_client,
     safe_selectors += [current_campaign_ids_window]
     return safe_selectors
 
+def get_field_list(discovered_schema, annotated_stream_schema, stream):
+    field_list = get_fields_to_sync(discovered_schema, annotated_stream_schema)
+    LOGGER.info("Request fields: %s", field_list)
+    field_list = filter_fields_by_stream_name(stream, field_list)
+    LOGGER.info("Filtered fields: %s", field_list)
+    field_list = [f[0].upper()+f[1:] for f in field_list]
+    LOGGER.info("Munged fields: %s", field_list)
+    return field_list
+
 def sync_generic_campaign_ids_endpoint(sdk_client,
                                        campaign_ids,
                                        annotated_stream_schema,
@@ -433,12 +442,7 @@ def sync_generic_campaign_ids_endpoint(sdk_client,
 
     LOGGER.info("Syncing %s for customer %s", stream, sdk_client.client_customer_id)
 
-    # FIXME extract function
-    field_list = get_fields_to_sync(discovered_schema, annotated_stream_schema)
-    LOGGER.info("Request fields: %s", field_list)
-    field_list = filter_fields_by_stream_name(stream, field_list)
-    LOGGER.info("Filtered fields: %s", field_list)
-    field_list = [f[0].upper()+f[1:] for f in field_list]
+    field_list = get_field_list(discovered_schema, annotated_stream_schema, stream)
 
     if stream == 'ads':
         is_campaign_ids_endpoint_page_fn = get_ads_page
@@ -480,12 +484,7 @@ def sync_generic_basic_endpoint(sdk_client, annotated_stream_schema, stream, get
 
     LOGGER.info("Syncing %s for customer %s", stream, sdk_client.client_customer_id)
 
-    # FIXME extract function
-    field_list = get_fields_to_sync(discovered_schema, annotated_stream_schema)
-    LOGGER.info("Request fields: %s", field_list)
-    field_list = filter_fields_by_stream_name(stream, field_list)
-    LOGGER.info("Filtered fields: %s", field_list)
-    field_list = [f[0].upper()+f[1:] for f in field_list]
+    field_list = get_field_list(discovered_schema, annotated_stream_schema, stream)
 
     start_index = 0
     while True:
